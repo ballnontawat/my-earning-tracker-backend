@@ -24,7 +24,9 @@ const pool = new Pool({
     host: params.hostname, // Extract hostname
     port: params.port,     // Extract port
     database: params.pathname.split('/')[1], // Extract database name
-    ssl: params.query.sslmode === 'require' ? { rejectUnauthorized: false } : false, // Adjust SSL based on sslmode=require
+    ssl: {
+        rejectUnauthorized: false // **นี่คือบรรทัดที่แก้ไขแล้ว** ทำให้ SSL ทำงานเสมอ
+    },
 });
 
 // Test database connection
@@ -49,8 +51,6 @@ app.get('/api/notes', async (req, res) => {
         return res.status(400).json({ message: 'Missing year or month parameter' });
     }
     try {
-        // Select notes for the desired month (adjust table structure and query as needed)
-        // Example: Fetch all notes within the specified year and month
         const result = await pool.query(
             `SELECT date_key, note_content FROM notes 
              WHERE EXTRACT(YEAR FROM date_key::date) = $1 
@@ -58,7 +58,6 @@ app.get('/api/notes', async (req, res) => {
             [year, month]
         );
 
-        // Convert array of objects to an object with date_key as key (like notes in Frontend)
         const notesMap = result.rows.reduce((acc, row) => {
             acc[row.date_key] = row.note_content;
             return acc;
@@ -76,16 +75,14 @@ app.get('/api/notes', async (req, res) => {
 // Body: { "date_key": "YYYY-MM-DD", "note_content": "Note text" }
 app.post('/api/notes', async (req, res) => {
     const { date_key, note_content } = req.body;
-    if (!date_key || note_content === undefined) { // note_content can be an empty string
+    if (!date_key || note_content === undefined) {
         return res.status(400).json({ message: 'Missing date_key or note_content' });
     }
     try {
         if (note_content.trim() === '') {
-            // If an empty note is sent, delete that note
             await pool.query('DELETE FROM notes WHERE date_key = $1', [date_key]);
             res.status(200).json({ message: 'Note deleted successfully' });
         } else {
-            // If there is a note, INSERT or UPDATE
             await pool.query(
                 'INSERT INTO notes (date_key, note_content) VALUES ($1, $2) ON CONFLICT (date_key) DO UPDATE SET note_content = $2',
                 [date_key, note_content]
