@@ -1,152 +1,173 @@
-// server.js
+require('dotenv').config(); // โหลดค่าจาก .env
+const express = require('express');
+const { Pool } = require('pg');
+const cors = require('cors');
 
-// ---------------------------
-// 1. Module Imports (นำเข้าโมดูลที่จำเป็น)
-// ---------------------------
-require('dotenv').config(); // โหลดตัวแปรสภาพแวดล้อมจากไฟล์ .env
-const express = require('express'); // Framework สำหรับสร้างเว็บแอปพลิเคชัน
-const { Pool } = require('pg'); // เชื่อมต่อกับ PostgreSQL Database
-const cors = require = require('cors'); // จัดการ Cross-Origin Resource Sharing (CORS) สำหรับการสื่อสารระหว่าง Frontend/Backend
+const app = express();
+const port = process.env.PORT || 3000; // ใช้ PORT จาก .env หรือ 3000
 
-const app = express(); // สร้าง Instance ของ Express App
-const port = process.env.PORT || 3000; // กำหนด Port ให้ Server รัน (ใช้ Port จาก .env หรือ 3000 เป็นค่าเริ่มต้น)
+// Middleware
+app.use(cors()); // อนุญาตให้ Frontend (ซึ่งอยู่คนละโดเมน) เรียก API ได้
+app.use(express.json()); // สำหรับ Parse JSON body จากคำขอ HTTP
 
-// ---------------------------
-// 2. Middleware Setup (ตั้งค่า Middleware)
-// ---------------------------
-app.use(cors()); // เปิดใช้งาน CORS สำหรับทุก requests
-app.use(express.json()); // Middleware สำหรับ Parse JSON Body จาก requests (เช่น POST, PUT)
-app.use(express.static('public')); // กำหนดให้ Serve ไฟล์ Static จาก Folder 'public' (สำหรับ Frontend)
-
-// ---------------------------
-// 3. Database Connection Pool (ตั้งค่าการเชื่อมต่อฐานข้อมูล)
-// ---------------------------
-// ใช้ DATABASE_URL จากตัวแปรสภาพแวดล้อมของ Render.com หรือ .env file
+// ตั้งค่า Pool สำหรับเชื่อมต่อ PostgreSQL
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL, // ใช้ Connection String โดยตรง
+    connectionString: process.env.DATABASE_URL,
     ssl: {
-        rejectUnauthorized: false // จำเป็นสำหรับ Render.com เมื่อเชื่อมต่อผ่าน SSL
+        rejectUnauthorized: false // สำหรับ Render.com หรือ SSL ที่ไม่ได้มีใบรับรองเต็มรูปแบบ
     }
 });
 
-// ตรวจสอบการเชื่อมต่อ Database
-pool.on('connect', () => {
-    console.log('Connected to the PostgreSQL database!');
+// ทดสอบการเชื่อมต่อฐานข้อมูล
+pool.connect((err) => {
+    if (err) {
+        console.error('Database connection error:', err.stack);
+    } else {
+        console.log('Connected to database');
+    }
 });
 
-pool.on('error', (err) => {
-    console.error('Error connecting to the database:', err);
-});
+// --- API Endpoints ---
 
-// ---------------------------
-// 4. API Endpoints (กำหนด Endpoint ของ API)
-// ---------------------------
-
-// 4.1. GET /api/notes: ดึงโน้ตทั้งหมด (หรือกรองตามวันที่/ผู้ใช้ในอนาคต)
-app.get('/api/notes', async (req, res) => {
+// Login Endpoint
+app.post('/login', async (req, res) => {
+    const { password } = req.body;
     try {
-        const result = await pool.query('SELECT id, date_key AS date, note_content AS text, user_name FROM notes ORDER BY date_key, id');
-        res.json(result.rows); // ส่งข้อมูลโน้ตทั้งหมดกลับไปในรูปแบบ JSON
-    } catch (err) {
-        console.error('Error fetching notes:', err);
-        res.status(500).json({ message: 'Internal Server Error' });
+        const result = await pool.query('SELECT id, username, password FROM users WHERE password = $1', [password]);
+        if (result.rows.length > 0) {
+            const user = result.rows[0];
+            // ส่งเฉพาะข้อมูลที่จำเป็นกลับไป ไม่ควรส่งรหัสผ่าน
+            res.json({ message: 'Login successful', user: { id: user.id, username: user.username } });
+        } else {
+            res.status(401).json({ message: 'Invalid password' });
+        }
+    } catch (error) {
+        console.error('Error during login:', error);
+        res.status(500).json({ message: 'Server error during login' });
     }
 });
 
-// 4.2. POST /api/notes: เพิ่มโน้ตใหม่
-app.post('/api/notes', async (req, res) => {
-    const { date, text, user_name } = req.body; // รับ date, text, user_name จาก Body ของ Request
-    // ตรวจสอบข้อมูลที่จำเป็น
-    if (!date || !text || !user_name) {
-        return res.status(400).json({ message: 'Date, text, and user_name are required.' });
+// **--- เพิ่ม API Endpoints สำหรับ daily_earnings และ monthly_summary ตรงนี้ ---**
+// คุณจะนำโค้ดจากคำตอบก่อนหน้ามาวางต่อจากบรรทัดนี้
+
+// Endpoint สำหรับบันทึกหรืออัปเดตข้อมูลค่าแรงรายวัน
+app.post('/api/daily-earnings', async (req, res) => {
+    const { userId, recordDate, dailyWage, overtimePay, allowance } = req.body;
+
+    if (!userId || !recordDate) {
+        return res.status(400).json({ message: 'User ID and record date are required.' });
     }
+
     try {
-        // ใช้ DEFAULT gen_random_uuid() สำหรับ id, ไม่ต้องใส่ใน INSERT
-        const result = await pool.query(
-            'INSERT INTO notes (date_key, note_content, user_name) VALUES ($1, $2, $3) RETURNING id, date_key AS date, note_content AS text, user_name',
-            [date, text, user_name] // ค่าที่ส่งไปใน Query
+        const existingEntry = await pool.query(
+            'SELECT * FROM daily_earnings WHERE user_id = $1 AND record_date = $2',
+            [userId, recordDate]
         );
-        res.status(201).json(result.rows[0]); // ส่งโน้ตที่เพิ่มใหม่กลับไปพร้อม ID ที่ถูกสร้าง
-    } catch (err) {
-        console.error('Error adding note:', err);
-        res.status(500).json({ message: 'Internal Server Error' });
+
+        let result;
+        if (existingEntry.rows.length > 0) {
+            result = await pool.query(
+                `UPDATE daily_earnings
+                 SET daily_wage = $1, overtime_pay = $2, allowance = $3, updated_at = NOW()
+                 WHERE user_id = $4 AND record_date = $5
+                 RETURNING *`,
+                [dailyWage, overtimePay, allowance, userId, recordDate]
+            );
+            console.log(`Updated daily earnings for user ${userId} on ${recordDate}`);
+        } else {
+            result = await pool.query(
+                `INSERT INTO daily_earnings (user_id, record_date, daily_wage, overtime_pay, allowance)
+                 VALUES ($1, $2, $3, $4, $5)
+                 RETURNING *`,
+                [userId, recordDate, dailyWage, overtimePay, allowance]
+            );
+            console.log(`Added new daily earnings for user ${userId} on ${recordDate}`);
+        }
+
+        res.status(200).json({ message: 'Daily earnings saved successfully', data: result.rows[0] });
+
+    } catch (error) {
+        console.error('Error saving daily earnings:', error);
+        res.status(500).json({ message: 'Failed to save daily earnings.' });
     }
 });
 
-// 4.3. PUT /api/notes/:id: แก้ไขโน้ตที่มีอยู่ (ตรวจสอบสิทธิ์ผู้ใช้)
-app.put('/api/notes/:id', async (req, res) => {
-    const { id } = req.params; // รับ ID ของโน้ตจาก URL Parameter
-    const { text, user_name } = req.body; // รับ text ใหม่และ user_name จาก Body ของ Request
+// Endpoint สำหรับดึงข้อมูลค่าแรงรายวันสำหรับเดือนที่เลือก
+app.get('/api/daily-earnings/:userId/:year/:month', async (req, res) => {
+    const { userId, year, month } = req.params;
+
+    const startDate = `${year}-${month.padStart(2, '0')}-01`;
+    // วันสุดท้ายของเดือนนั้นๆ โดยใช้ month + 1 และ day = 0
+    const endDate = new Date(year, parseInt(month), 0).toISOString().split('T')[0]; 
+
+    try {
+        const result = await pool.query(
+            `SELECT id, user_id, record_date, daily_wage, overtime_pay, allowance
+             FROM daily_earnings
+             WHERE user_id = $1
+               AND record_date >= $2
+               AND record_date <= $3
+             ORDER BY record_date ASC`,
+            [userId, startDate, endDate]
+        );
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching daily earnings:', error);
+        res.status(500).json({ message: 'Failed to fetch daily earnings.' });
+    }
+});
+
+// Endpoint สำหรับดึงยอดรวมค่าแรงรายเดือน (ตัดรอบ 21-20)
+app.get('/api/monthly-summary/:userId/:year/:month', async (req, res) => {
+    const { userId, year, month } = req.params;
+
+    let startMonth = parseInt(month);
+    let startYear = parseInt(year);
+    let endMonth = startMonth + 1;
+    let endYear = startYear;
+
+    if (startMonth === 12) { // ถ้าเดือนเริ่มต้นคือธันวาคม (12)
+        endMonth = 1; // เดือนสิ้นสุดคือมกราคม (1)
+        endYear = startYear + 1; // ปีสิ้นสุดคือปีถัดไป
+    }
     
-    // ตรวจสอบข้อมูลที่จำเป็น
-    if (!text || !user_name) {
-        return res.status(400).json({ message: 'Text and user_name are required for update.' });
-    }
+    // วันที่เริ่มต้น: วันที่ 21 ของเดือนปัจจุบันที่เลือก
+    const startDate = `${startYear}-${String(startMonth).padStart(2, '0')}-21`;
+    // วันที่สิ้นสุด: วันที่ 20 ของเดือนถัดไป
+    const endDate = `${endYear}-${String(endMonth).padStart(2, '0')}-20`;
 
     try {
-        // ก่อนอัปเดต: ตรวจสอบว่าโน้ตนั้นเป็นของผู้ใช้คนนี้หรือไม่
-        const checkOwnership = await pool.query('SELECT user_name FROM notes WHERE id = $1', [id]);
-        if (checkOwnership.rows.length === 0) {
-            return res.status(404).json({ message: 'Note not found.' });
-        }
-        if (checkOwnership.rows[0].user_name !== user_name) {
-            return res.status(403).json({ message: 'Forbidden: You do not own this note.' }); // ถ้าไม่ใช่เจ้าของ
-        }
-
-        // ถ้าเป็นเจ้าของ ให้อัปเดตได้
         const result = await pool.query(
-            'UPDATE notes SET note_content = $1 WHERE id = $2 RETURNING id, date_key AS date, note_content AS text, user_name',
-            [text, id] // อัปเดตเฉพาะ note_content
+            `SELECT
+                SUM(daily_wage) AS total_wage,
+                SUM(overtime_pay) AS total_overtime,
+                SUM(allowance) AS total_allowance
+             FROM daily_earnings
+             WHERE user_id = $1
+               AND record_date >= $2
+               AND record_date <= $3`,
+            [userId, startDate, endDate]
         );
+
+        const summary = result.rows[0] || { total_wage: 0, total_overtime: 0, total_allowance: 0 };
         
-        if (result.rows.length > 0) {
-            res.json(result.rows[0]); // ส่งโน้ตที่อัปเดตแล้วกลับไป
-        } else {
-            res.status(404).json({ message: 'Note not found.' });
-        }
-    } catch (err) {
-        console.error('Error updating note:', err);
-        res.status(500).json({ message: 'Internal Server Error' });
+        // แปลงค่าจาก string/null เป็น number และตั้งค่าเริ่มต้นเป็น 0 ถ้าเป็น null
+        summary.total_wage = parseFloat(summary.total_wage || 0);
+        summary.total_overtime = parseFloat(summary.overtime_pay || 0); // แก้ไขตรงนี้
+        summary.total_allowance = parseFloat(summary.allowance || 0); // แก้ไขตรงนี้
+
+        // คำนวณยอดรวมทั้งหมด
+        summary.grand_total = summary.total_wage + summary.total_overtime + summary.total_allowance;
+
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Error fetching monthly summary:', error);
+        res.status(500).json({ message: 'Failed to fetch monthly summary.' });
     }
 });
 
-// 4.4. DELETE /api/notes/:id: ลบโน้ต (ตรวจสอบสิทธิ์ผู้ใช้)
-app.delete('/api/notes/:id', async (req, res) => {
-    const { id } = req.params; // รับ ID ของโน้ตจาก URL Parameter
-    const { user_name } = req.body; // รับ user_name จาก Body ของ Request
 
-    if (!user_name) {
-        return res.status(400).json({ message: 'User name is required for deletion.' });
-    }
-
-    try {
-        // ก่อนลบ: ตรวจสอบว่าโน้ตนั้นเป็นของผู้ใช้คนนี้หรือไม่
-        const checkOwnership = await pool.query('SELECT user_name FROM notes WHERE id = $1', [id]);
-        if (checkOwnership.rows.length === 0) {
-            return res.status(404).json({ message: 'Note not found.' });
-        }
-        if (checkOwnership.rows[0].user_name !== user_name) {
-            return res.status(403).json({ message: 'Forbidden: You do not own this note.' }); // ถ้าไม่ใช่เจ้าของ
-        }
-
-        // ถ้าเป็นเจ้าของ ให้ลบได้
-        const result = await pool.query('DELETE FROM notes WHERE id = $1 RETURNING id', [id]);
-
-        if (result.rows.length > 0) {
-            res.status(200).json({ message: 'Note deleted successfully.' });
-        } else {
-            res.status(404).json({ message: 'Note not found.' });
-        }
-    } catch (err) {
-        console.error('Error deleting note:', err);
-        res.status(500).json({ message: 'Internal Server Error' });
-    }
-});
-
-// ---------------------------
-// 5. Start Server (เริ่มทำงาน Server)
-// ---------------------------
+// Start the server
 app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-    console.log(`Open your browser at http://localhost:${port}`);
+    console.log(`Backend server running on port ${port}`);
 });
