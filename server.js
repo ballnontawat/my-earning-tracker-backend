@@ -11,29 +11,40 @@ app.use(cors()); // อนุญาตให้ Frontend (ซึ่งอยู�
 app.use(express.json()); // สำหรับ Parse JSON body จากคำขอ HTTP
 
 // ตั้งค่า Pool สำหรับเชื่อมต่อ PostgreSQL
+// การใช้ Pool จะช่วยจัดการการเชื่อมต่อฐานข้อมูลให้มีประสิทธิภาพและเสถียรขึ้น
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
         rejectUnauthorized: false // สำหรับ Render.com หรือ SSL ที่ไม่ได้มีใบรับรองเต็มรูปแบบ
-    }
+    },
+    // เพิ่มการกำหนดค่า Pool เพื่อจัดการ Idle Timeout และจำนวน Connection
+    // max: 20, // จำนวน Connection สูงสุดใน Pool
+    // idleTimeoutMillis: 30000, // Connection ที่ไม่ได้ใช้งานนานแค่ไหนถึงจะถูกปิด (30 วินาที)
+    // connectionTimeoutMillis: 2000, // รอนานแค่ไหนในการได้ Connection ใหม่จาก Pool (2 วินาที)
 });
 
 // ทดสอบการเชื่อมต่อฐานข้อมูล
-pool.connect((err) => {
+pool.connect((err, client, release) => {
     if (err) {
         console.error('Database connection error:', err.stack);
+        // หากเชื่อมต่อไม่ได้ตั้งแต่แรก อาจจะต้องพิจารณาหยุด Server หรือมีระบบ retry
     } else {
         console.log('Connected to database');
+        release(); // ปล่อย client กลับสู่ pool ทันทีหลังจากทดสอบ
     }
 });
 
 // --- API Endpoints ---
 
 // Login Endpoint
+// หมายเหตุ: การตรวจสอบรหัสผ่านใน Backend แบบนี้ยังไม่ปลอดภัยสำหรับ Production ควรใช้การ Hashing รหัสผ่าน
 app.post('/login', async (req, res) => {
     const { password } = req.body;
+    let client; // ประกาศ client ไว้ด้านนอก try เพื่อให้เข้าถึงได้ใน finally
     try {
-        const result = await pool.query('SELECT id, username, password FROM users WHERE password = $1', [password]);
+        client = await pool.connect(); // ยืม client จาก pool
+        const result = await client.query('SELECT id, username, password FROM users WHERE password = $1', [password]);
+        
         if (result.rows.length > 0) {
             const user = result.rows[0];
             // ส่งเฉพาะข้อมูลที่จำเป็นกลับไป ไม่ควรส่งรหัสผ่าน
@@ -44,11 +55,12 @@ app.post('/login', async (req, res) => {
     } catch (error) {
         console.error('Error during login:', error);
         res.status(500).json({ message: 'Server error during login' });
+    } finally {
+        if (client) {
+            client.release(); // คืน client กลับสู่ pool เสมอ
+        }
     }
 });
-
-// **--- เพิ่ม API Endpoints สำหรับ daily_earnings และ monthly_summary ตรงนี้ ---**
-// คุณจะนำโค้ดจากคำตอบก่อนหน้ามาวางต่อจากบรรทัดนี้
 
 // Endpoint สำหรับบันทึกหรืออัปเดตข้อมูลค่าแรงรายวัน
 app.post('/api/daily-earnings', async (req, res) => {
@@ -58,15 +70,17 @@ app.post('/api/daily-earnings', async (req, res) => {
         return res.status(400).json({ message: 'User ID and record date are required.' });
     }
 
+    let client;
     try {
-        const existingEntry = await pool.query(
+        client = await pool.connect();
+        const existingEntry = await client.query(
             'SELECT * FROM daily_earnings WHERE user_id = $1 AND record_date = $2',
             [userId, recordDate]
         );
 
         let result;
         if (existingEntry.rows.length > 0) {
-            result = await pool.query(
+            result = await client.query(
                 `UPDATE daily_earnings
                  SET daily_wage = $1, overtime_pay = $2, allowance = $3, updated_at = NOW()
                  WHERE user_id = $4 AND record_date = $5
@@ -75,7 +89,7 @@ app.post('/api/daily-earnings', async (req, res) => {
             );
             console.log(`Updated daily earnings for user ${userId} on ${recordDate}`);
         } else {
-            result = await pool.query(
+            result = await client.query(
                 `INSERT INTO daily_earnings (user_id, record_date, daily_wage, overtime_pay, allowance)
                  VALUES ($1, $2, $3, $4, $5)
                  RETURNING *`,
@@ -89,6 +103,10 @@ app.post('/api/daily-earnings', async (req, res) => {
     } catch (error) {
         console.error('Error saving daily earnings:', error);
         res.status(500).json({ message: 'Failed to save daily earnings.' });
+    } finally {
+        if (client) {
+            client.release();
+        }
     }
 });
 
@@ -100,8 +118,10 @@ app.get('/api/daily-earnings/:userId/:year/:month', async (req, res) => {
     // วันสุดท้ายของเดือนนั้นๆ โดยใช้ month + 1 และ day = 0
     const endDate = new Date(year, parseInt(month), 0).toISOString().split('T')[0]; 
 
+    let client;
     try {
-        const result = await pool.query(
+        client = await pool.connect();
+        const result = await client.query(
             `SELECT id, user_id, record_date, daily_wage, overtime_pay, allowance
              FROM daily_earnings
              WHERE user_id = $1
@@ -114,6 +134,10 @@ app.get('/api/daily-earnings/:userId/:year/:month', async (req, res) => {
     } catch (error) {
         console.error('Error fetching daily earnings:', error);
         res.status(500).json({ message: 'Failed to fetch daily earnings.' });
+    } finally {
+        if (client) {
+            client.release();
+        }
     }
 });
 
@@ -136,8 +160,10 @@ app.get('/api/monthly-summary/:userId/:year/:month', async (req, res) => {
     // วันที่สิ้นสุด: วันที่ 20 ของเดือนถัดไป
     const endDate = `${endYear}-${String(endMonth).padStart(2, '0')}-20`;
 
+    let client;
     try {
-        const result = await pool.query(
+        client = await pool.connect();
+        const result = await client.query(
             `SELECT
                 SUM(daily_wage) AS total_wage,
                 SUM(overtime_pay) AS total_overtime,
@@ -152,9 +178,10 @@ app.get('/api/monthly-summary/:userId/:year/:month', async (req, res) => {
         const summary = result.rows[0] || { total_wage: 0, total_overtime: 0, total_allowance: 0 };
         
         // แปลงค่าจาก string/null เป็น number และตั้งค่าเริ่มต้นเป็น 0 ถ้าเป็น null
+        // แก้ไขให้ใช้ชื่อคอลัมน์ที่ SUM() แล้วจาก SQL query
         summary.total_wage = parseFloat(summary.total_wage || 0);
-        summary.total_overtime = parseFloat(summary.overtime_pay || 0); // แก้ไขตรงนี้
-        summary.total_allowance = parseFloat(summary.allowance || 0); // แก้ไขตรงนี้
+        summary.total_overtime = parseFloat(summary.total_overtime || 0); 
+        summary.total_allowance = parseFloat(summary.total_allowance || 0); 
 
         // คำนวณยอดรวมทั้งหมด
         summary.grand_total = summary.total_wage + summary.total_overtime + summary.total_allowance;
@@ -163,6 +190,10 @@ app.get('/api/monthly-summary/:userId/:year/:month', async (req, res) => {
     } catch (error) {
         console.error('Error fetching monthly summary:', error);
         res.status(500).json({ message: 'Failed to fetch monthly summary.' });
+    } finally {
+        if (client) {
+            client.release();
+        }
     }
 });
 
